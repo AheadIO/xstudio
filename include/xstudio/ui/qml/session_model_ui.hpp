@@ -251,6 +251,7 @@ class SESSION_QML_EXPORT SessionModel : public caf::mixin::actor_object<JSONTree
     Q_INVOKABLE void relinkMedia(const QModelIndexList &indexes, const QUrl &path);
     Q_INVOKABLE void decomposeMedia(const QModelIndexList &indexes);
     Q_INVOKABLE void rescanMedia(const QModelIndexList &indexes);
+    Q_INVOKABLE QModelIndex getPlaylistIndex(const QModelIndex &index) const;
 
   signals:
     void bookmarkActorAddrChanged();
@@ -337,7 +338,6 @@ class SESSION_QML_EXPORT SessionModel : public caf::mixin::actor_object<JSONTree
         const utility::JsonTree &tree,
         const QPersistentModelIndex &search_hint = QModelIndex());
     utility::Uuid refreshId(nlohmann::json &ij);
-    QModelIndex getPlaylistIndex(const QModelIndex &index) const;
 
     QFuture<QList<QUuid>> handleMediaIdDropFuture(
         const int proposedAction, const utility::JsonStore &drop, const QModelIndex &index);
