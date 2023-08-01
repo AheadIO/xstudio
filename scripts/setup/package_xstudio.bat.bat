@@ -25,7 +25,7 @@ set "QTPath=%~2"
 set "ffmpegBinFolder=%~3"
 
 REM Default paths
-set "defaultWorkspacePath=C:\workspace\opensource\windows"
+set "defaultWorkspacePath=C:\workspace\opensource\xstudio"
 set "defaultQTPath=C:\Qt\5.15.2\msvc2019_64"
 set "defaultFfmpegBinFolder=C:\ffmpeg\ffmpeg-n5.1-latest-win64-lgpl-shared-5.1\bin"
 
@@ -198,7 +198,7 @@ REM Copy the entire "fonts" directory to "Debug" folder
 xcopy /E /I "%fontsSourceFolder%" "%fontsTargetFolder%"
 
 "%QTPath%\bin\windeployqt.exe" --qmldir --force "%buildFolder%" "%releaseBinFolder%\xstudio.exe"
-"%QTPath%\bin\windeployqt.exe" --qmldir --force "%buildFolder%" "%debugBinFolder%\xstudio.exe"
+"%QTPath%\bin\windeployqt.exe" "%debugBinFolder%\xstudio.exe"
 
 echo DLL files from "Debug" folders copied to "%debugBinFolder%"
 echo DLL files from "Release" folders copied to "%releaseBinFolder%"
