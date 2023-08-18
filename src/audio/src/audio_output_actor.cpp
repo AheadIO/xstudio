@@ -16,11 +16,8 @@
 #include "linux_audio_output_device.hpp"
 #endif
 #ifdef _WIN32
-#ifdef WINDOWS_AUDIO
 #include "windows_audio_output_device.hpp"
 #endif
-#endif
-
 
 using namespace caf;
 using namespace xstudio::audio;
@@ -65,9 +62,7 @@ AudioOutputDeviceActor::AudioOutputDeviceActor(
                 // this stops the loop pushing samples to the soundcard
                 playing_ = false;
 #ifdef _WIN32
-#ifdef WINDOWS_AUDIO
                 output_device_->disconnect_from_soundcard();
-#endif
 #endif
 #ifdef __linux__
                 output_device_->disconnect_from_soundcard();
@@ -75,11 +70,9 @@ AudioOutputDeviceActor::AudioOutputDeviceActor(
             } else if (is_playing && !playing_) {
                 // start loop
                 playing_ = true;
-#ifdef _WIN32
-#ifdef WINDOWS_AUDIO              
+#ifdef _WIN32            
                 output_device_->connect_to_soundcard();
                 anon_send(actor_cast<caf::actor>(this), push_samples_atom_v);
-#endif
 #endif
 #ifdef __linux__
                 output_device_->connect_to_soundcard();
@@ -98,8 +91,13 @@ AudioOutputDeviceActor::AudioOutputDeviceActor(
             if (waiting_for_samples_ || !playing_)
                 return;
             waiting_for_samples_ = true;
-
+            
             const long num_samps_soundcard_wants = (long)output_device_->desired_samples();
+            if (num_samps_soundcard_wants < 0) {
+                spdlog::error(
+                    "Negative number of desired samples: {}", num_samps_soundcard_wants);
+                return; // Don't process further for this call.
+            }
             auto tt                              = utility::clock::now();
             request(
                 actor_cast<caf::actor>(audio_playback_manager_),
@@ -133,9 +131,7 @@ void AudioOutputDeviceActor::open_output_device(const utility::JsonStore &prefs)
         output_device_ = std::make_unique<LinuxAudioOutputDevice>(prefs);
 #endif
 #ifdef _WIN32
-#ifdef WINDOWS_AUDIO
         output_device_ = std::make_unique<WindowsAudioOutputDevice>(prefs);
-#endif
 #endif
     } catch (std::exception &e) {
         spdlog::debug(

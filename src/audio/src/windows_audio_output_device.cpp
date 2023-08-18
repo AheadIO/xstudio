@@ -1,10 +1,10 @@
-#ifdef WINDOWS_AUDIO
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <Audioclient.h>
 #include <atlbase.h>
 #include <atlcomcli.h>
 #include <mmdeviceapi.h>
+#include <functiondiscoverykeys_devpkey.h>
 #include <iostream>
 #include <string>
 
@@ -18,13 +18,6 @@ using namespace xstudio::global_store;
 
 WindowsAudioOutputDevice::WindowsAudioOutputDevice(const utility::JsonStore &prefs)
     : AudioOutputDevice(), prefs_(prefs) {
-    // Get the default sound card and use default sample rate and number of channels
-    HRESULT hr = initializeAudioClient(
-        L"", 44100, 2); // Use empty string for sound card to pick the default
-    if (FAILED(hr)) {
-        // Just log the error and continue
-        spdlog::error("Failed to initialize audio client: HRESULT 0x{:X}", hr);
-    }
 }
 
 WindowsAudioOutputDevice::~WindowsAudioOutputDevice() {
@@ -32,11 +25,13 @@ WindowsAudioOutputDevice::~WindowsAudioOutputDevice() {
 }
 
 void WindowsAudioOutputDevice::disconnect_from_soundcard() {
+    if (render_client_) {
+        render_client_ = nullptr;
+    }
     if (audio_client_) {
         audio_client_->Stop();
         audio_client_ = nullptr;
     }
-    render_client_ = nullptr;
 }
 
 HRESULT WindowsAudioOutputDevice::initializeAudioClient(
@@ -59,9 +54,51 @@ HRESULT WindowsAudioOutputDevice::initializeAudioClient(
         return hr;
     }
 
-    // If sound_card is not provided, get the default audio-render device
-    if (sound_card.empty()) {
-        hr = device_enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &audio_device);
+    // If sound_card is not provided, enumerate the devices and pick the first one
+    if (sound_card.empty() || sound_card == L"default") {
+        CComPtr<IMMDeviceCollection> device_collection;
+        UINT device_count = 0;
+        hr = device_enumerator->EnumAudioEndpoints(
+            eRender, DEVICE_STATE_ACTIVE, &device_collection);
+        if (FAILED(hr)) {
+            return hr;
+        }
+
+        hr = device_collection->GetCount(&device_count);
+        if (FAILED(hr) || device_count == 0) {
+            return E_FAIL; // or some suitable error
+        }
+
+        // For this example, we're just taking the first device
+        CComPtr<IMMDevice> first_device;
+        hr = device_collection->Item(0, &first_device);
+        if (FAILED(hr)) {
+            return hr;
+        }
+
+        // Print the device name
+        CComPtr<IPropertyStore> property_store;
+        hr = first_device->OpenPropertyStore(STGM_READ, &property_store);
+        if (SUCCEEDED(hr)) {
+            PROPVARIANT var_name;
+            PropVariantInit(&var_name);
+
+            hr = property_store->GetValue(PKEY_Device_FriendlyName, &var_name);
+            if (SUCCEEDED(hr)) {
+                wprintf(L"Device Name: %s\n", var_name.pwszVal);
+                PropVariantClear(&var_name); // always clear the PROPVARIANT to release any
+                                             // memory it might've allocated
+            }
+        }
+
+        LPWSTR device_id = nullptr;
+        hr = first_device->GetId(&device_id);
+        if (FAILED(hr)) {
+            return hr;
+        }
+
+        hr = device_enumerator->GetDevice(device_id, &audio_device);
+        ::CoTaskMemFree(device_id); // free the memory for the ID
     } else {
         // Get the audio-render device based on the provided sound_card
         hr = device_enumerator->GetDevice(sound_card.c_str(), &audio_device);
@@ -81,28 +118,63 @@ HRESULT WindowsAudioOutputDevice::initializeAudioClient(
         return hr;
     }
 
-    // Initialize the audio format
-    WAVEFORMATEX* wave_format = nullptr;
-    WAVEFORMATEXTENSIBLE wfext;
-    wfext.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
-    wfext.Format.nChannels = num_channels;
-    wfext.Format.nSamplesPerSec = sample_rate;
-    wfext.Format.wBitsPerSample = 16;
-    wfext.Format.nBlockAlign = wfext.Format.nChannels * (wfext.Format.wBitsPerSample / 8);
-    wfext.Format.nAvgBytesPerSec = wfext.Format.nSamplesPerSec * wfext.Format.nBlockAlign;
-    wfext.Format.cbSize = 22;
-    wfext.Samples.wValidBitsPerSample = wfext.Format.wBitsPerSample;
-    wfext.dwChannelMask = KSAUDIO_SPEAKER_STEREO;
-    wfext.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
-    wave_format = reinterpret_cast<WAVEFORMATEX*>(&wfext);
+    // Get the mix format from the audio client
+    WAVEFORMATEX *pMixFormat = NULL;
+    hr                       = audio_client_->GetMixFormat(&pMixFormat);
+    if (FAILED(hr)) {
+        spdlog::error("Failed to get mix format: HRESULT=0x{:08x}", hr);
+        return hr;
+    }
 
-    // Initialize the audio client
-    hr = audio_client_->Initialize(AUDCLNT_SHAREMODE_SHARED,
-                                   AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                                   buffer_size_ * 10000,  // buffer duration
-                                   0,  // periodicity
-                                   wave_format,
-                                   nullptr);  // session GUID
+    // Print the mix format details
+    spdlog::info("Mix Format Details:");
+    spdlog::info("Format Tag: {}", pMixFormat->wFormatTag);
+    spdlog::info("Channels: {}", pMixFormat->nChannels);
+    spdlog::info("Sample Rate: {}", pMixFormat->nSamplesPerSec);
+    spdlog::info("Bits Per Sample: {}", pMixFormat->wBitsPerSample);
+    spdlog::info("Block Align: {}", pMixFormat->nBlockAlign);
+    spdlog::info("Average Bytes Per Second: {}", pMixFormat->nAvgBytesPerSec);
+
+    if (pMixFormat->wFormatTag == WAVE_FORMAT_EXTENSIBLE && pMixFormat->cbSize >= 22) {
+        WAVEFORMATEXTENSIBLE *pExtensible =
+            reinterpret_cast<WAVEFORMATEXTENSIBLE *>(pMixFormat);
+        spdlog::info("Valid Bits Per Sample: {}", pExtensible->Samples.wValidBitsPerSample);
+        spdlog::info("Channel Mask: {}", pExtensible->dwChannelMask);
+        // Add more fields if needed
+    }
+
+    // Fetch the currently active shared mode format
+    WAVEFORMATEX *wavefmt = NULL;
+    UINT32 current_period = 0;
+    hr                    = audio_client_->GetCurrentSharedModeEnginePeriod(
+        (WAVEFORMATEX **)&wavefmt, &current_period);
+    if (FAILED(hr)) {
+        spdlog::error("Failed to get current shared mode engine period: HRESULT=0x{:08x}", hr);
+        CoTaskMemFree(pMixFormat);
+        return hr;
+    }
+
+    // Fetch the minimum period supported by the current setup
+    UINT32 DP, FP, MINP, MAXP;
+    hr = audio_client_->GetSharedModeEnginePeriod(wavefmt, &DP, &FP, &MINP, &MAXP);
+    if (FAILED(hr)) {
+        spdlog::error("Failed to get shared mode engine period details: HRESULT=0x{:08x}", hr);
+        CoTaskMemFree(pMixFormat);
+        CoTaskMemFree(wavefmt);
+        return hr;
+    }
+
+    // Initialize the audio client with the mix format
+    hr = audio_client_->InitializeSharedAudioStream(
+        AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+        MINP,
+        wavefmt,
+        nullptr // session GUID
+    );
+
+    // Free the mix format and wave format after usage
+    CoTaskMemFree(pMixFormat);
+    CoTaskMemFree(wavefmt);
 
     return hr;
 }
@@ -130,26 +202,27 @@ void WindowsAudioOutputDevice::connect_to_soundcard() {
     HRESULT hr = initializeAudioClient(sound_card, sample_rate_, num_channels_);
     if (FAILED(hr)) {
         spdlog::error("{} Failed to initialize audio client: HRESULT=0x{:08x}", __PRETTY_FUNCTION__, hr);
-        throw std::runtime_error("Failed to initialize audio client");
+        return; // or handle the error as appropriate
     }
 
     // Get an IAudioRenderClient instance
     hr = audio_client_->GetService(__uuidof(IAudioRenderClient),
                                    reinterpret_cast<void**>(&render_client_));
     if (FAILED(hr)) {
-        spdlog::error("{} Failed to get render client: HRESULT=0x{:08x}", __PRETTY_FUNCTION__, hr);
-        throw std::runtime_error("Failed to get render client");
+        spdlog::error("Failed to get IAudioRenderClient: HRESULT=0x{:08x}", hr);
+        return; // or handle the error as appropriate
     }
 
-    //spdlog::debug("{} Connected to soundcard : {} ", __PRETTY_FUNCTION__, to_utf8(sound_card).c_str());
+    spdlog::debug("Connected to soundcard");
 }
 
 long WindowsAudioOutputDevice::desired_samples() {
     // Note: WASAPI works with a fixed buffer size, so this will return the same
     // value for the duration of a playback session
-    UINT32 bufferSize;
-    HRESULT hr = audio_client_->GetBufferSize(&bufferSize);
+    UINT32 bufferSize = 0; // initialize to 0
+    HRESULT hr        = audio_client_->GetBufferSize(&bufferSize);
     if (FAILED(hr)) {
+        spdlog::error("Failed to get buffer size from WASAPI with HRESULT: 0x{:08x}", hr);
         throw std::runtime_error("Failed to get buffer size");
     }
     return bufferSize;
@@ -158,26 +231,91 @@ long WindowsAudioOutputDevice::desired_samples() {
 long WindowsAudioOutputDevice::latency_microseconds() {
     // Note: This will just return the latency that WASAPI reports,
     // which may not include all sources of latency
-    REFERENCE_TIME defaultDevicePeriod, minimumDevicePeriod;
+    REFERENCE_TIME defaultDevicePeriod = 0, minimumDevicePeriod = 0; // initialize to 0
     HRESULT hr = audio_client_->GetDevicePeriod(&defaultDevicePeriod, &minimumDevicePeriod);
     if (FAILED(hr)) {
+        spdlog::error("Failed to get device period from WASAPI with HRESULT: 0x{:08x}", hr);
         throw std::runtime_error("Failed to get device period");
     }
     return defaultDevicePeriod / 10; // convert 100-nanosecond units to microseconds
 }
 
 void WindowsAudioOutputDevice::push_samples(const void *sample_data, const long num_samples) {
-    BYTE *buffer;
-    HRESULT hr = render_client_->GetBuffer(num_samples, &buffer);
-    if (FAILED(hr)) {
-        throw std::runtime_error("Failed to get buffer");
+    if (num_samples < 0) {
+        spdlog::error("Negative number of samples provided: {}", num_samples);
+        return;
     }
 
-    memcpy(buffer, sample_data, num_samples * sizeof(float));
+    // Ensure we have a valid render_client_
+    if (!render_client_) {
+        spdlog::error("Invalid Render Client");
+        return; // Exit if no render client is set
+    }
 
-    hr = render_client_->ReleaseBuffer(num_samples, 0);
+    // Check if sample_data is valid.
+    if (!sample_data) {
+        spdlog::error("Sample data pointer is NULL.");
+        return;
+    }
+
+    // Retrieve the size (maximum capacity) of the endpoint buffer.
+    UINT32 buffer_framecount = 0;
+    HRESULT hr               = audio_client_->GetBufferSize(&buffer_framecount);
     if (FAILED(hr)) {
-        throw std::runtime_error("Failed to release buffer");
+        spdlog::error("Failed to get buffer size from WASAPI");
+        return;
+    }
+
+    // Get the number of frames of padding in the endpoint buffer.
+    UINT32 pad = 0;
+    hr         = audio_client_->GetCurrentPadding(&pad);
+    if (FAILED(hr)) {
+        spdlog::error("Failed to get current padding from WASAPI");
+        return;
+    }
+
+    // Calculate the number of frames we can safely write into the buffer without overflow.
+    int actual_size = (buffer_framecount - pad);
+    if (actual_size > num_samples) {
+        actual_size = num_samples; // Ensure we don't attempt to write more samples than we have
+    }
+
+    // Size Mismatch Check
+    if (actual_size % sizeof(int16_t) != 0) {
+        spdlog::error("Actual size might not represent the correct number of int16_t samples.");
+        return;
+    }
+
+    // Get a buffer from WASAPI for our audio data.
+    BYTE *buffer;
+    hr = render_client_->GetBuffer(actual_size, &buffer);
+    if (FAILED(hr)) {
+        spdlog::error("GetBuffer failed with HRESULT: 0x{:08x}", hr);
+        throw std::runtime_error("Failed to get buffer from WASAPI");
+    }
+
+    // Null Buffer Check
+    if (!buffer) {
+        spdlog::error("Buffer is not allocated!");
+        return;
+    }
+
+    // Convert int16_t PCM data to float samples
+    int16_t *pcmData     = (int16_t *)sample_data;
+    float *floatBuffer   = (float *)buffer;
+    const float maxInt16 = 32767.0f;
+    for (long i = 0; i < actual_size; i++) {
+        floatBuffer[i] = pcmData[i] / maxInt16;
+    }
+
+    // Print some values from sample_data
+    for (long i = 0; i < std::min<long>(actual_size, 10); i++) {
+        spdlog::info("Sample[{}]: {}", i, pcmData[i]);
+    }
+
+    // Release the buffer back to WASAPI to play.
+    hr = render_client_->ReleaseBuffer(actual_size, 0);
+    if (FAILED(hr)) {
+        throw std::runtime_error("Failed to release buffer to WASAPI");
     }
 }
-#endif 
