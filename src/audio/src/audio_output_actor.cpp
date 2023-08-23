@@ -110,7 +110,9 @@ AudioOutputDeviceActor::AudioOutputDeviceActor(
                 .then(
                     [=](const std::vector<int16_t> &samples_to_play) mutable {
                         output_device_->push_samples(
-                            (const void *)samples_to_play.data(), num_samps_soundcard_wants);
+                            (const void *)samples_to_play.data(),
+                            num_samps_soundcard_wants,
+                            output_device_->num_channels());
 
                         waiting_for_samples_ = false;
 
@@ -166,12 +168,18 @@ void AudioOutputControlActor::init() {
             const int sample_rate) -> result<std::vector<int16_t>> {
             std::vector<int16_t> samples;
             try {
-
+                spdlog::info(
+                    "Starting prepare_samples_for_soundcard. Num samples: {}, Delay: {}, "
+                    "Channels: {}, Sample Rate: {}",
+                    num_samps_to_push,
+                    microseconds_delay,
+                    num_channels,
+                    sample_rate);
                 prepare_samples_for_soundcard(
                     samples, num_samps_to_push, microseconds_delay, num_channels, sample_rate);
-
+                spdlog::info("Finished prepare_samples_for_soundcard successfully.");
             } catch (std::exception &e) {
-
+                spdlog::error("Error during prepare_samples_for_soundcard: {}", e.what());
                 return caf::make_error(xstudio_error::error, e.what());
             }
             return samples;

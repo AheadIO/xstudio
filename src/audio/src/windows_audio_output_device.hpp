@@ -29,7 +29,7 @@ namespace audio {
 
         long desired_samples() override;
 
-        void push_samples(const void *sample_data, const long num_samples) override;
+        void push_samples(const void *sample_data, const long num_samples, int channel_count) override;
 
         long latency_microseconds() override;
 
@@ -40,7 +40,7 @@ namespace audio {
         [[nodiscard]] SampleFormat sample_format() const override { return sample_format_; }
 
       private:
-        long sample_rate_ = {44100};
+        long sample_rate_ = {48000};
         int num_channels_ = {2};
         long buffer_size_ = {2048};
         SampleFormat sample_format_ = {SampleFormat::INT16};
@@ -51,7 +51,7 @@ namespace audio {
 
         HRESULT initializeAudioClient(
         const std::wstring &sound_card = L"",
-        long sample_rate               = 44100,
+        long sample_rate               = 48000,
         int num_channels               = 2);
 
     };

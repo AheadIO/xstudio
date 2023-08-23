@@ -36,7 +36,7 @@ void WindowsAudioOutputDevice::disconnect_from_soundcard() {
 
 HRESULT WindowsAudioOutputDevice::initializeAudioClient(
     const std::wstring &sound_card /* = L"" */,
-    long sample_rate /* = 44100 */,
+    long sample_rate /* = 48000 */,
     int num_channels /* = 2 */) {
 
     CComPtr<IMMDeviceEnumerator> device_enumerator;
@@ -181,7 +181,7 @@ HRESULT WindowsAudioOutputDevice::initializeAudioClient(
 
 void WindowsAudioOutputDevice::connect_to_soundcard() {
 
-    sample_rate_ = 44100; //default values
+    sample_rate_ = 48000; //default values
     num_channels_ = 2;
     std::wstring sound_card(L"default");
     buffer_size_ = 2048; // Adjust to match your preferences
@@ -240,9 +240,18 @@ long WindowsAudioOutputDevice::latency_microseconds() {
     return defaultDevicePeriod / 10; // convert 100-nanosecond units to microseconds
 }
 
-void WindowsAudioOutputDevice::push_samples(const void *sample_data, const long num_samples) {
-    if (num_samples < 0) {
-        spdlog::error("Negative number of samples provided: {}", num_samples);
+void WindowsAudioOutputDevice::push_samples(
+    const void *sample_data, const long num_samples, int channel_count) {
+
+    // 1. Function Entry & Initial Parameters
+    spdlog::info(
+        "Entering push_samples with {} samples, {} channels.", num_samples, channel_count);
+
+    if (num_samples < 0 || num_samples % channel_count != 0) {
+        spdlog::error(
+            "Invalid number of samples provided: {}. Expected a multiple of {}",
+            num_samples,
+            channel_count);
         return;
     }
 
@@ -250,12 +259,6 @@ void WindowsAudioOutputDevice::push_samples(const void *sample_data, const long 
     if (!render_client_) {
         spdlog::error("Invalid Render Client");
         return; // Exit if no render client is set
-    }
-
-    // Check if sample_data is valid.
-    if (!sample_data) {
-        spdlog::error("Sample data pointer is NULL.");
-        return;
     }
 
     // Retrieve the size (maximum capacity) of the endpoint buffer.
@@ -266,6 +269,9 @@ void WindowsAudioOutputDevice::push_samples(const void *sample_data, const long 
         return;
     }
 
+    // 2. Buffer Size Info
+    spdlog::info("Buffer frame count from WASAPI: {}", buffer_framecount);
+
     // Get the number of frames of padding in the endpoint buffer.
     UINT32 pad = 0;
     hr         = audio_client_->GetCurrentPadding(&pad);
@@ -274,48 +280,53 @@ void WindowsAudioOutputDevice::push_samples(const void *sample_data, const long 
         return;
     }
 
+    // 3. Padding Info
+    spdlog::info("Current padding from WASAPI: {}", pad);
+
     // Calculate the number of frames we can safely write into the buffer without overflow.
-    int actual_size = (buffer_framecount - pad);
-    if (actual_size > num_samples) {
-        actual_size = num_samples; // Ensure we don't attempt to write more samples than we have
+    long available_frames = buffer_framecount - pad;
+    long frames_to_write  = num_samples / channel_count;
+    if (available_frames < frames_to_write) {
+        frames_to_write = available_frames;
     }
 
-    // Size Mismatch Check
-    if (actual_size % sizeof(int16_t) != 0) {
-        spdlog::error("Actual size might not represent the correct number of int16_t samples.");
-        return;
-    }
+    // 4. Write and Availability Info
+    spdlog::info(
+        "Frames available to write: {}. Frames attempting to write: {}",
+        available_frames,
+        frames_to_write);
 
     // Get a buffer from WASAPI for our audio data.
     BYTE *buffer;
-    hr = render_client_->GetBuffer(actual_size, &buffer);
+    hr = render_client_->GetBuffer(frames_to_write * channel_count, &buffer);
     if (FAILED(hr)) {
         spdlog::error("GetBuffer failed with HRESULT: 0x{:08x}", hr);
         throw std::runtime_error("Failed to get buffer from WASAPI");
     }
 
-    // Null Buffer Check
-    if (!buffer) {
-        spdlog::error("Buffer is not allocated!");
-        return;
-    }
+    // 5. Successful Buffer Retrieval
+    spdlog::info("Successfully retrieved buffer from WASAPI for writing.");
 
-    // Convert int16_t PCM data to float samples
+    // Convert int16_t PCM data to float samples considering the interleaved format.
     int16_t *pcmData     = (int16_t *)sample_data;
     float *floatBuffer   = (float *)buffer;
     const float maxInt16 = 32767.0f;
-    for (long i = 0; i < actual_size; i++) {
+
+    long total_samples_to_process = frames_to_write * channel_count;
+    for (long i = 0; i < total_samples_to_process; i++) {
         floatBuffer[i] = pcmData[i] / maxInt16;
     }
 
-    // Print some values from sample_data
-    for (long i = 0; i < std::min<long>(actual_size, 10); i++) {
-        spdlog::info("Sample[{}]: {}", i, pcmData[i]);
-    }
-
     // Release the buffer back to WASAPI to play.
-    hr = render_client_->ReleaseBuffer(actual_size, 0);
+    hr = render_client_->ReleaseBuffer(frames_to_write * channel_count, 0);
     if (FAILED(hr)) {
+        spdlog::error("Failed to release buffer to WASAPI with HRESULT: 0x{:08x}", hr);
         throw std::runtime_error("Failed to release buffer to WASAPI");
     }
+
+    // 6. Successful Buffer Release
+    spdlog::info("Successfully released buffer to WASAPI for playback.");
+
+    // 7. Function Exit
+    spdlog::info("Exiting push_samples.");
 }
